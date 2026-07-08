@@ -1,14 +1,35 @@
+export const dynamic = "force-dynamic";
+
 export type VesselStatus = "SAFE" | "ILLEGAL VESSEL DETECTED";
 
-interface SensorData {
-  spl: number;
-  fft: number;
-  ema: number;
-  status: VesselStatus;
-  updatedAt: number;
+export interface SensorData {
+  spl: number | null;
+  fft: number | null;
+  ema: number | null;
+  lat: number | null;
+  lon: number | null;
+  sat: number | null;
+  pdr: number;
+  rssi: number | null;
+  snr: number | null;
+  status: VesselStatus | null;
+  updatedAt: number | null;
 }
 
-let latestSensorData: SensorData | null = null;
+// In-memory store for ESP32 POST payloads (resets on server restart)
+let latestData: SensorData = {
+  spl: null,
+  fft: null,
+  ema: null,
+  lat: null,
+  lon: null,
+  sat: null,
+  pdr: 0,
+  rssi: null,
+  snr: null,
+  status: null,
+  updatedAt: null,
+};
 
 function computeStatus(spl: number, fft: number, ema: number): VesselStatus {
   if (spl > 70 && fft > 5 && ema > 65) {
@@ -17,45 +38,52 @@ function computeStatus(spl: number, fft: number, ema: number): VesselStatus {
   return "SAFE";
 }
 
+function isNumber(value: unknown): value is number {
+  return typeof value === "number" && !Number.isNaN(value);
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json();
 
-    if (
-      typeof body.spl !== "number" ||
-      typeof body.fft !== "number" ||
-      typeof body.ema !== "number"
-    ) {
+    const requiredFields = ["spl", "fft", "ema", "lat", "lon", "sat", "pdr", "rssi", "snr"] as const;
+    const missing = requiredFields.filter((key) => !isNumber(body[key]));
+
+    if (missing.length > 0) {
       return Response.json(
-        { error: "Expected { spl: number, fft: number, ema: number }" },
+        {
+          error: `Expected numeric fields: ${requiredFields.join(", ")}`,
+          missing,
+        },
         { status: 400 }
       );
     }
 
-    latestSensorData = {
+    latestData = {
       spl: body.spl,
       fft: body.fft,
       ema: body.ema,
+      lat: body.lat,
+      lon: body.lon,
+      sat: body.sat,
+      pdr: body.pdr,
+      rssi: body.rssi,
+      snr: body.snr,
       status: computeStatus(body.spl, body.fft, body.ema),
       updatedAt: Date.now(),
     };
+    console.log("DATA MASUK:", latestData);
 
-    return Response.json({ success: true, data: latestSensorData });
+    return Response.json({ success: true, data: latestData });
   } catch {
     return Response.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 }
 
 export async function GET() {
-  if (!latestSensorData) {
-    return Response.json({
-      spl: null,
-      fft: null,
-      ema: null,
-      status: null,
-      updatedAt: null,
-    });
-  }
-
-  return Response.json(latestSensorData);
+  return Response.json(latestData, {
+    headers: {
+      "Cache-Control": "no-store, no-cache",
+    },
+  });
 }

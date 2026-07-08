@@ -3,8 +3,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
+  AlertCircle,
   Anchor,
-  Battery,
+  Loader2,
   MapPin,
   Radio,
   Signal,
@@ -55,15 +56,21 @@ const FFT_FREQUENCIES = [50, 100, 150, 200, 250, 300, 350, 400, 450, 500];
 const FFT_ENERGY_THRESHOLD = 72;
 const MAX_HISTORY = 36;
 
-const GPS_COORDS = { lat: -6.123, lng: 106.456 };
-
 interface SensorApiResponse {
   spl: number | null;
   fft: number | null;
   ema: number | null;
+  lat: number | null;
+  lon: number | null;
+  sat: number | null;
+  pdr: number | null;
+  rssi: number | null;
+  snr: number | null;
   status: MonitoringStatus | null;
   updatedAt: number | null;
 }
+
+const POLL_INTERVAL_MS = 2000;
 
 // ——— Helpers ———
 
@@ -91,6 +98,69 @@ function buildFftBands(fftEnergy: number): FftBand[] {
     energy: Math.round(fftEnergy * 10) / 10,
     hz,
   }));
+}
+
+function hasSensorData(data: SensorApiResponse): boolean {
+  return data.updatedAt !== null;
+}
+
+// ——— Sensor polling component ———
+
+function SensorMonitor({
+  onData,
+  onLoadingChange,
+  onError,
+}: {
+  onData: (data: SensorApiResponse) => void;
+  onLoadingChange: (loading: boolean) => void;
+  onError: (error: string | null) => void;
+}) {
+  useEffect(() => {
+    let isMounted = true;
+
+    const fetchSensorData = async () => {
+      try {
+        const response = await fetch("/api/sensor", {
+          cache: "no-store",
+          headers: {
+            "Bypass-Tunnel-Reminder": "true",
+            "ngrok-skip-browser-warning": "true",
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error(`Gagal memuat data (HTTP ${response.status})`);
+        }
+
+        const data: SensorApiResponse = await response.json();
+
+        if (!isMounted) return;
+
+        onError(null);
+        onData(data);
+      } catch (err) {
+        if (!isMounted) return;
+        onError(
+          err instanceof Error ? err.message : "Terjadi kesalahan jaringan"
+        );
+      } finally {
+        if (isMounted) {
+          onLoadingChange(false);
+        }
+      }
+    };
+
+    onLoadingChange(true);
+    fetchSensorData();
+    const interval = setInterval(fetchSensorData, POLL_INTERVAL_MS);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [onData, onLoadingChange, onError]);
+
+  return null;
 }
 
 // ——— Sub-components ———
@@ -144,44 +214,6 @@ function SummaryCard({
   );
 }
 
-function BatteryIndicator({ percent }: { percent: number | null }) {
-  const level =
-    percent === null ? "mid" : percent > 60 ? "high" : percent > 30 ? "mid" : "low";
-  const color =
-    percent === null
-      ? "text-slate-500"
-      : level === "high"
-        ? "text-emerald-400"
-        : level === "mid"
-          ? "text-amber-400"
-          : "text-red-400";
-
-  return (
-    <div className="flex items-center gap-3 rounded-lg border border-cyan-900/40 bg-slate-900/80 px-4 py-2">
-      <Battery className={cn("h-6 w-6", color)} />
-      <div>
-        <p className="text-[10px] uppercase tracking-wider text-slate-500">
-          Baterai Pelampung
-        </p>
-        <p className={cn("font-mono text-lg font-bold tabular-nums", color)}>
-          {formatValue(percent)}%
-        </p>
-      </div>
-      <div className="ml-2 h-2 w-24 overflow-hidden rounded-full bg-slate-800">
-        <div
-          className={cn(
-            "h-full rounded-full transition-all duration-500",
-            level === "high" && "bg-emerald-500",
-            level === "mid" && "bg-amber-500",
-            level === "low" && "bg-red-500"
-          )}
-          style={{ width: `${percent ?? 0}%` }}
-        />
-      </div>
-    </div>
-  );
-}
-
 const chartTooltipStyle = {
   contentStyle: {
     background: "rgba(15, 23, 42, 0.95)",
@@ -197,46 +229,52 @@ const chartTooltipStyle = {
 export default function DashboardPage() {
   const lastUpdatedAtRef = useRef<number | null>(null);
 
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<MonitoringStatus>("SAFE");
   const [spl, setSpl] = useState<number | null>(null);
+  const [fft, setFft] = useState<number | null>(null);
+  const [ema, setEma] = useState<number | null>(null);
+  const [lat, setLat] = useState<number | null>(null);
+  const [lon, setLon] = useState<number | null>(null);
+  const [sat, setSat] = useState<number | null>(null);
+  const [pdr, setPdr] = useState<number | null>(null);
+  const [rssi, setRssi] = useState<number | null>(null);
+  const [snr, setSnr] = useState<number | null>(null);
   const [splHistory, setSplHistory] = useState<SplPoint[]>([]);
   const [fftBands, setFftBands] = useState<FftBand[]>([]);
+  const [loraHistory, setLoraHistory] = useState<LoraPoint[]>([]);
   const [lastUpdate, setLastUpdate] = useState<string>("—");
+  const [hasData, setHasData] = useState(false);
 
-  const rssi: number | null = null;
-  const snr: number | null = null;
-  const pdr: number | null = null;
-  const battery: number | null = null;
-  const loraHistory: LoraPoint[] = [];
+  const handleSensorData = useMemo(
+    () => (data: SensorApiResponse) => {
+      const received = hasSensorData(data);
+      setHasData(received);
 
-  useEffect(() => {
-    const fetchSensorData = async () => {
-      try {
-        const response = await fetch("/api/sensor");
-        if (!response.ok) return;
+      if (!received) return;
 
-        const data: SensorApiResponse = await response.json();
-        if (
-          data.spl === null ||
-          data.fft === null ||
-          data.ema === null ||
-          data.status === null ||
-          data.updatedAt === null
-        ) {
-          return;
-        }
+      setSpl(data.spl !== null ? Math.round(data.spl * 10) / 10 : null);
+      setFft(data.fft !== null ? Math.round(data.fft * 10) / 10 : null);
+      setEma(data.ema !== null ? Math.round(data.ema * 10) / 10 : null);
+      setLat(data.lat);
+      setLon(data.lon);
+      setSat(data.sat);
+      setPdr(data.pdr !== null ? Math.round(data.pdr * 10) / 10 : null);
+      setRssi(data.rssi);
+      setSnr(data.snr);
+      setStatus(data.status ?? "SAFE");
 
-        const bands = buildFftBands(data.fft);
+      if (data.fft !== null) {
+        setFftBands(buildFftBands(data.fft));
+      }
 
-        setSpl(Math.round(data.spl * 10) / 10);
-        setFftBands(bands);
-        setStatus(data.status);
+      if (data.updatedAt !== null && data.updatedAt !== lastUpdatedAtRef.current) {
+        lastUpdatedAtRef.current = data.updatedAt;
+        const timeLabel = formatTime(new Date(data.updatedAt));
+        setLastUpdate(timeLabel);
 
-        if (data.updatedAt !== lastUpdatedAtRef.current) {
-          lastUpdatedAtRef.current = data.updatedAt;
-          const timeLabel = formatTime(new Date(data.updatedAt));
-          setLastUpdate(timeLabel);
-
+        if (data.spl !== null && data.ema !== null) {
           setSplHistory((prev) => {
             const next = [
               ...prev,
@@ -245,15 +283,30 @@ export default function DashboardPage() {
             return next.slice(-MAX_HISTORY);
           });
         }
-      } catch {
-        // Ignore transient network errors during polling
-      }
-    };
 
-    fetchSensorData();
-    const interval = setInterval(fetchSensorData, 1000);
-    return () => clearInterval(interval);
-  }, []);
+        if (data.rssi !== null && data.snr !== null) {
+          setLoraHistory((prev) => {
+            const next = [
+              ...prev,
+              { time: timeLabel, rssi: data.rssi!, snr: data.snr! },
+            ];
+            return next.slice(-MAX_HISTORY);
+          });
+        }
+      }
+    },
+    []
+  );
+
+  const handleLoadingChange = useMemo(
+    () => (loading: boolean) => setIsLoading(loading),
+    []
+  );
+
+  const handleError = useMemo(
+    () => (message: string | null) => setError(message),
+    []
+  );
 
   const statusIcon = useMemo(() => {
     switch (status) {
@@ -266,7 +319,35 @@ export default function DashboardPage() {
 
   return (
     <div className="dashboard-bg min-h-screen">
+      <SensorMonitor
+        onData={handleSensorData}
+        onLoadingChange={handleLoadingChange}
+        onError={handleError}
+      />
+
       <div className="mx-auto max-w-[1600px] space-y-6 p-4 md:p-6 lg:p-8">
+        {/* ——— LOADING / ERROR BANNERS ——— */}
+        {isLoading && (
+          <div className="flex items-center gap-3 rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-200">
+            <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+            Memuat data sensor...
+          </div>
+        )}
+
+        {error && (
+          <div className="flex items-center gap-3 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            {error}
+          </div>
+        )}
+
+        {!isLoading && !error && !hasData && (
+          <div className="flex items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+            <Radio className="h-4 w-4 shrink-0" />
+            Menunggu data pertama dari ESP32 via POST /api/sensor...
+          </div>
+        )}
+
         {/* ——— TOP HEADER ——— */}
         <header className="flex flex-col gap-4 border-b border-cyan-900/30 pb-6 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-start gap-4">
@@ -281,7 +362,7 @@ export default function DashboardPage() {
                 Sistem Pemantauan Akustik Illegal Fishing (LoRa & ESP32)
               </h1>
               <p className="mt-1 font-mono text-xs text-slate-500">
-                Pembaruan terakhir: {lastUpdate} · Interval 1s (ESP32)
+                Pembaruan terakhir: {lastUpdate} · Polling {POLL_INTERVAL_MS / 1000}s
               </p>
             </div>
           </div>
@@ -294,39 +375,66 @@ export default function DashboardPage() {
               {statusIcon}
               {status}
             </Badge>
-            <BatteryIndicator percent={battery} />
           </div>
         </header>
 
-        {/* ——— SUMMARY CARDS ——— */}
-        <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {/* ——— LIVE SENSOR METRICS ——— */}
+        <section className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-8">
           <SummaryCard
-            title="Rata-rata SPL"
+            title="SPL"
             value={formatValue(spl)}
             unit="dB"
             icon={Volume2}
             accent="cyan"
           />
           <SummaryCard
-            title="RSSI LoRa"
+            title="FFT"
+            value={formatValue(fft)}
+            unit=""
+            icon={Activity}
+            accent="violet"
+          />
+          <SummaryCard
+            title="EMA"
+            value={formatValue(ema)}
+            unit="dB"
+            icon={Waves}
+            accent="emerald"
+          />
+          <SummaryCard
+            title="Latitude"
+            value={lat !== null ? lat.toFixed(5) : "—"}
+            unit="°"
+            icon={MapPin}
+            accent="cyan"
+          />
+          <SummaryCard
+            title="Longitude"
+            value={lon !== null ? lon.toFixed(5) : "—"}
+            unit="°"
+            icon={MapPin}
+            accent="cyan"
+          />
+          <SummaryCard
+            title="PDR"
+            value={formatValue(pdr)}
+            unit="%"
+            icon={Radio}
+            accent="amber"
+          />
+          <SummaryCard
+            title="RSSI"
             value={formatValue(rssi)}
             unit="dBm"
             icon={Signal}
             accent="violet"
           />
           <SummaryCard
-            title="SNR LoRa"
+            title="SNR"
             value={formatValue(snr)}
             unit="dB"
             icon={Wifi}
             accent="emerald"
-          />
-          <SummaryCard
-            title="Packet Delivery Ratio"
-            value={formatValue(pdr)}
-            unit="%"
-            icon={Radio}
-            accent="amber"
           />
         </section>
 
@@ -495,7 +603,7 @@ export default function DashboardPage() {
                     />
                     <YAxis
                       yAxisId="rssi"
-                      domain={[-100, -60]}
+                      domain={["auto", "auto"]}
                       tick={{ fill: "#a78bfa", fontSize: 11 }}
                       tickLine={false}
                       axisLine={{ stroke: "rgba(167, 139, 250, 0.3)" }}
@@ -510,7 +618,7 @@ export default function DashboardPage() {
                     <YAxis
                       yAxisId="snr"
                       orientation="right"
-                      domain={[0, 16]}
+                      domain={["auto", "auto"]}
                       tick={{ fill: "#34d399", fontSize: 11 }}
                       tickLine={false}
                       axisLine={{ stroke: "rgba(52, 211, 153, 0.3)" }}
@@ -579,16 +687,15 @@ export default function DashboardPage() {
                       Koordinat Pelampung
                     </p>
                     <p className="mt-2 font-mono text-lg text-cyan-300">
-                      Lat: {GPS_COORDS.lat.toFixed(3)}, Lng:{" "}
-                      {GPS_COORDS.lng.toFixed(3)}
+                      Lat: {formatValue(lat, 5)}, Lng: {formatValue(lon, 5)}
+                    </p>
+                    <p className="mt-1 font-mono text-sm text-slate-400">
+                      Satelit GPS: {sat !== null ? sat : "—"}
                     </p>
                     <p className="mt-1 text-xs text-slate-500">
                       Wilayah pemantauan perairan · Smart Buoy #01
                     </p>
                   </div>
-                  <span className="rounded-full border border-cyan-800/50 bg-slate-900/80 px-3 py-1 text-[10px] uppercase tracking-widest text-cyan-600">
-                    Peta interaktif — coming soon
-                  </span>
                 </div>
               </div>
             </CardContent>

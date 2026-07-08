@@ -183,6 +183,7 @@ void TaskLoRa(void *pvParameters) {
                        ",EMA=" + String(sharedEMA, 1);
 
       LoRa.beginPacket();
+      delay(10);
       LoRa.print(payload);
       int result = LoRa.endPacket();
 
@@ -190,7 +191,7 @@ void TaskLoRa(void *pvParameters) {
       Serial.println(payload);
       Serial.println("=============================\n");
 
-      vTaskDelay(pdMS_TO_TICKS(2000));
+      vTaskDelay(pdMS_TO_TICKS(3000));
       
     } else if (isCalibrated && loraReady && !gpsFix) {
       // Notif kalau Mic udah siap tapi masih nunggu GPS
@@ -243,7 +244,12 @@ void setup() {
   
   if (retry < 10) {
     LoRa.setSyncWord(0xF3);
-    LoRa.setTxPower(17);
+    // --- SETTINGAN BARU (WAJIB SAMA KAYAK RX) ---
+    LoRa.setTxPower(20);              // Power mentok 20dBm biar jangkauan jauh
+    LoRa.setSpreadingFactor(8);       // Tahan noise/ombak (RX juga harus 8!)
+    LoRa.setSignalBandwidth(125E3);   // Bandwidth standar
+    LoRa.enableCrc();                 // Aktifin proteksi anti-data cacat
+    // --------------------------------------------
     loraReady = true;
     Serial.println("OK!");
   } else {
